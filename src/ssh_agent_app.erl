@@ -26,5 +26,14 @@
 %% THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 %%
 
--module(ssh_agent).
+-module(ssh_agent_app).
 
+-behaviour(application).
+
+-export([start/2, stop/1]).
+
+start(_Type, _Args) ->
+    ssh_agent_sup:start_link().
+
+stop(_State) ->
+    ok.

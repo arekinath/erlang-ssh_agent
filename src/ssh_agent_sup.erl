@@ -26,5 +26,25 @@
 %% THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 %%
 
--module(ssh_agent).
+-module(ssh_agent_sup).
 
+-behaviour(supervisor).
+
+-export([start_link/0]).
+-export([init/1]).
+
+start_link() ->
+    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+
+init([]) ->
+    ChildSpecs = [
+        #{id => ssh_agent_conn,
+          start => {ssh_agent_conn, start_link, []},
+          restart => transient}
+    ],
+    {ok, {
+        #{strategy => simple_one_for_one,
+          intensity => 60,
+          period => 60},
+        ChildSpecs
+    }}.

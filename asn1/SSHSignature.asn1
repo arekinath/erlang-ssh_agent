@@ -1,0 +1,8 @@
+SSHSignature DEFINITIONS EXPLICIT TAGS ::= BEGIN
+
+ECDSASignature ::= SEQUENCE {
+	r INTEGER,
+	s INTEGER
+}
+
+END
