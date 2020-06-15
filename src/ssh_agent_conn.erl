@@ -36,16 +36,15 @@
 -export([start_link/1]).
 -export([init/1, terminate/2, handle_call/3, handle_cast/2, handle_info/2]).
 
--type config() :: #{path => string()}.
 -type from() :: {pid(), Tag :: term()}.
--type op() :: list_keys.
 -type cmd() :: {from(), op()}.
 
+-spec start_link(ssh_agent:config()) -> {ok, pid()} | {error, term()}.
 start_link(Config) ->
     gen_server:start_link(?MODULE, [Config], []).
 
 -record(?MODULE, {
-    config :: config(),
+    config :: ssh_agent:config(),
     path :: string(),
     socket :: gen_tcp:socket(),
     cmd = idle :: idle | cmd(),
@@ -55,6 +54,8 @@ start_link(Config) ->
 
 -define(SSH_AGENTC_REQUEST_IDENTITIES, 11).
 -define(SSH_AGENTC_SIGN_REQUEST, 13).
+-define(SSH_AGENTC_LOCK, 22).
+-define(SSH_AGENTC_UNLOCK, 23).
 -define(SSH_AGENTC_EXTENSION, 27).
 
 -define(SSH_AGENT_SUCCESS, 6).
@@ -72,6 +73,29 @@ start_link(Config) ->
     data :: binary(),
     flags = [] :: [sign_flag()]
 }).
+
+-record(lock_request, {
+    passphrase :: binary()
+}).
+
+-record(unlock_request, {
+    passphrase :: binary()
+}).
+
+-record(extension_request, {
+    extension :: binary(),
+    data :: term()
+}).
+
+-type ecdh_flag() :: none.
+-record(ext_ecdh, {
+    key :: public_key:public_key(),
+    partner :: public_key:public_key(),
+    flags = [] :: [ecdh_flag()]
+}).
+
+-type op() :: list_keys | #sign_request{} | #lock_request{} |
+    #unlock_request{} | #extension_request{}.
 
 init([Config]) ->
     Path = case Config of
@@ -99,7 +123,31 @@ handle_call({sign, Key, Data}, From, S0 = #?MODULE{}) ->
         _ -> []
     end,
     Req = #sign_request{key = Key, data = Data, flags = Flags},
-    enqueue_and_send({From, Req}, S0).
+    enqueue_and_send({From, Req}, S0);
+
+handle_call({lock, Pw}, From, S0 = #?MODULE{}) ->
+    enqueue_and_send({From, #lock_request{passphrase = Pw}}, S0);
+
+handle_call({unlock, Pw}, From, S0 = #?MODULE{}) ->
+    enqueue_and_send({From, #unlock_request{passphrase = Pw}}, S0);
+
+handle_call(list_extensions, From, S0 = #?MODULE{}) ->
+    Req = #extension_request{extension = <<"query">>},
+    enqueue_and_send({From, Req}, S0);
+
+handle_call({ecdh, Key, OtherKey}, From, S0 = #?MODULE{}) ->
+    Req = #extension_request{
+        extension = <<"ecdh@joyent.com">>,
+        data = #ext_ecdh{
+            key = Key,
+            partner = OtherKey
+        }
+    },
+    enqueue_and_send({From, Req}, S0);
+
+handle_call(close, From, S0 = #?MODULE{}) ->
+    gen_server:reply(From, ok),
+    {stop, normal, S0}.
 
 enqueue_and_send(FromOp, S0 = #?MODULE{cmdq = Q0}) ->
     Q1 = queue:in(FromOp, Q0),
@@ -117,9 +165,54 @@ encode_sign_request(#sign_request{key = K, data = D, flags = F}) ->
       (byte_size(D)):32/big, D/binary,
       Flags:32/big>>.
 
-decode_success_ext(Op, Bin) -> ok.
+encode_lock_request(#lock_request{passphrase = Pw}) ->
+    <<?SSH_AGENTC_LOCK,
+      (byte_size(Pw)):32/big, Pw/binary>>;
+encode_lock_request(#unlock_request{passphrase = Pw}) ->
+    <<?SSH_AGENTC_UNLOCK,
+      (byte_size(Pw)):32/big, Pw/binary>>.
 
-decode_failure_ext(Op, Bin) -> ok.
+encode_ext_ecdh(#ext_ecdh{key = K, partner = P, flags = F}) ->
+    [] = F,
+    KBlob = public_key:ssh_encode(K, ssh2_pubkey),
+    PBlob = public_key:ssh_encode(P, ssh2_pubkey),
+    <<(byte_size(KBlob)):32/big, KBlob/binary,
+      (byte_size(PBlob)):32/big, PBlob/binary,
+      0:32/big>>.
+
+encode_ext_request(#extension_request{extension = Ext, data = D}) ->
+    Data = case Ext of
+        <<"query">> -> <<>>;
+        <<"ecdh@joyent.com">> -> encode_ext_ecdh(D)
+    end,
+    <<?SSH_AGENTC_EXTENSION,
+      (byte_size(Ext)):32/big, Ext/binary,
+      (byte_size(Data)):32/big, Data/binary>>.
+
+decode_ext_reply_query(<<NExts:32/big, Rem0/binary>>) ->
+    {Exts, _Rem1} = lists:foldl(fun
+        (_N, {Acc0, <<L0:32/big, Ext:L0/binary, IRem0/binary>>}) ->
+            {[Ext | Acc0], IRem0}
+    end, {[], Rem0}, lists:seq(1, NExts)),
+    {ok, lists:reverse(Exts)}.
+
+decode_ext_reply_ecdh(<<L0:32/big, Secret:(L0)/binary>>) ->
+    {ok, Secret}.
+
+decode_success_ext(#extension_request{extension = Ext}, Bin) ->
+    case Ext of
+        <<"query">> -> decode_ext_reply_query(Bin);
+        <<"ecdh@joyent.com">> -> decode_ext_reply_ecdh(Bin)
+    end.
+
+decode_failure_ext(_Op, Bin) ->
+    {error, Bin}.
+
+to_colonhex(Bin) ->
+    Hex = << <<Y>> || <<X:4>> <= Bin,
+        Y <- string:to_lower(integer_to_list(X,16)) >>,
+    Pairs = [ <<X,Y>> || <<X,Y>> <= Hex ],
+    iolist_to_binary(lists:join(<<":">>, Pairs)).
 
 decode_identity(<<L0:32/big, KeyBlob:(L0)/binary,
                   L1:32/big, Comment:(L1)/binary, Rem/binary>>) ->
@@ -127,7 +220,13 @@ decode_identity(<<L0:32/big, KeyBlob:(L0)/binary,
         {'EXIT', Why} ->
             {error, {bad_identity, Why}};
         PubKey ->
-            {ok, #{pubkey => PubKey, comment => Comment}, Rem}
+            Fps = [
+                iolist_to_binary([
+                    "SHA256:", base64:encode(crypto:hash(sha256, KeyBlob))]),
+                to_colonhex(crypto:hash(md5, KeyBlob))
+            ],
+            Id = #{pubkey => PubKey, comment => Comment, fingerprints => Fps},
+            {ok, Id, Rem}
     end.
 
 decode_n_identities(0, SoFar, <<>>) -> {ok, lists:reverse(SoFar)};
@@ -175,7 +274,10 @@ send_next(S0 = #?MODULE{cmdq = Q0, socket = Socket}) ->
         {{value, {From, Op}}, Q1} ->
             Msg = case Op of
                 request_identities -> <<?SSH_AGENTC_REQUEST_IDENTITIES>>;
-                #sign_request{} -> encode_sign_request(Op)
+                #sign_request{} -> encode_sign_request(Op);
+                #lock_request{} -> encode_lock_request(Op);
+                #unlock_request{} -> encode_lock_request(Op);
+                #extension_request{} -> encode_ext_request(Op)
             end,
             ok = gen_tcp:send(Socket, Msg),
             {noreply, S0#?MODULE{cmdq = Q1, cmd = {From, Op}}};

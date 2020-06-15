@@ -28,3 +28,48 @@
 
 -module(ssh_agent).
 
+-export([open/1, open/0, close/1]).
+-export([list_keys/1, sign/3]).
+-export([list_extensions/1, ecdh/3]).
+
+-export_type([client/0, config/0]).
+
+-opaque client() :: pid().
+
+-type config() :: #{path => string()}.
+-type identity() :: #{
+    pubkey => pubkey(),
+    comment => binary(),
+    fingerprints => [binary()]
+    }.
+-type siginfo() :: #{hash => crypto:hash_algorithm(), signature => binary()}.
+-type extension() :: binary().
+-type pubkey() :: public_key:public_key().
+
+-spec open(config()) -> {ok, client()} | {error, term()}.
+open(Config) ->
+    ssh_agent_sup:start_child(Config).
+
+-spec open() -> {ok, client()} | {error, term()}.
+open() ->
+    open(#{}).
+
+-spec close(client()) -> ok | {error, term()}.
+close(Client) ->
+    gen_server:call(Client, close).
+
+-spec list_keys(client()) -> {ok, [identity()]} | {error, term()}.
+list_keys(Client) ->
+    gen_server:call(Client, list_keys).
+
+-spec sign(client(), pubkey(), binary()) -> {ok, siginfo()} | {error, term()}.
+sign(Client, PubKey, Data) ->
+    gen_server:call(Client, {sign, PubKey, Data}).
+
+-spec list_extensions(client()) -> {ok, [extension()]} | {error, term()}.
+list_extensions(Client) ->
+    gen_server:call(Client, list_extensions).
+
+-spec ecdh(client(), pubkey(), public_key:public_key()) -> {ok, binary()} | {error, term()}.
+ecdh(Client, PubKey, OtherKey) ->
+    gen_server:call(Client, {ecdh, PubKey, OtherKey}).

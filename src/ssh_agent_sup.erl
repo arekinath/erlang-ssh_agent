@@ -30,11 +30,15 @@
 
 -behaviour(supervisor).
 
--export([start_link/0]).
+-export([start_link/0, start_child/1]).
 -export([init/1]).
 
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+
+-spec start_child(ssh_agent:config()) -> {ok, pid()} | {error, term()}.
+start_child(Config) ->
+    supervisor:start_child(?MODULE, [Config]).
 
 init([]) ->
     ChildSpecs = [
