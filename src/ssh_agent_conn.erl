@@ -125,6 +125,10 @@ handle_call({sign, Key, Data}, From, S0 = #?MODULE{}) ->
     Req = #sign_request{key = Key, data = Data, flags = Flags},
     enqueue_and_send({From, Req}, S0);
 
+handle_call({sign, Key, Data, Flags}, From, S0 = #?MODULE{}) ->
+    Req = #sign_request{key = Key, data = Data, flags = Flags},
+    enqueue_and_send({From, Req}, S0);
+
 handle_call({lock, Pw}, From, S0 = #?MODULE{}) ->
     enqueue_and_send({From, #lock_request{passphrase = Pw}}, S0);
 
@@ -241,7 +245,7 @@ decode_n_identities(N, SoFar, Bin0) ->
 decode_identities_answer(<<NKeys:32/big, Rem/binary>>) ->
     decode_n_identities(NKeys, [], Rem).
 
-decode_sign_response(#sign_request{key = K, flags = F},
+decode_sign_response(#sign_request{key = K, flags = _F},
                      <<L0:32/big, Sig:(L0)/binary>>) ->
     <<L1:32/big, SigAlg:(L1)/binary,
       L2:32/big, SigData:(L2)/binary>> = Sig,
@@ -326,13 +330,13 @@ handle_info({tcp_closed, Socket}, S0 = #?MODULE{closing = true, socket = Socket}
     {stop, normal, S0};
 
 handle_info({tcp_closed, Socket}, S0 = #?MODULE{closing = false, socket = Socket}) ->
-    lists:foreach(fun ({From, Op}) ->
+    lists:foreach(fun ({From, _Op}) ->
         gen_server:reply(From, {error, closed})
     end, queue:to_list(S0#?MODULE.cmdq)),
     {stop, {error, unexpected_close}, S0};
 
 handle_info({tcp_error, Socket, Reason}, S0 = #?MODULE{socket = Socket}) ->
-    lists:foreach(fun ({From, Op}) ->
+    lists:foreach(fun ({From, _Op}) ->
         gen_server:reply(From, {error, Reason})
     end, queue:to_list(S0#?MODULE.cmdq)),
     {stop, {error, Reason}, S0}.
