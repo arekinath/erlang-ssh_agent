@@ -10,6 +10,6 @@
   {modules, [ssh_agent, ssh_agent_app, ssh_agent_sup, ssh_agent_conn]},
   {mod, {ssh_agent_app, []}},
 
-  {licenses, ["Apache 2.0"]},
-  {links, []}
+  {licenses, ["BSD-2-Clause"]},
+  {links, [{"GitHub", "https://github.com/arekinath/erlang-ssh_agent"}]}
  ]}.
